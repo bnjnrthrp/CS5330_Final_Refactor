@@ -30,7 +30,21 @@ class Scene(WindowConfig):
         super().__init__(**kwargs)
         self.wnd.ctx.error
 
-        self.q = queue.Queue(1) # Create a queue to hold the most recent frame
+        # Initialize the webcam to capture a frame to record its dimensions
+        self.cap = cv2.VideoCapture(0)
+        ret, frame = self.cap.read()
+    
+        if ret:
+            # Get camera dimensions
+            h, w, _ = frame.shape
+            self.camera_dimensions = (w, h)
+        else:
+            # Fallback dimensions if camera fails
+            self.camera_dimensions = (640, 480)
+
+        self.input_queue = queue.Queue(1) # Create a queue to hold the most recent frame
+        self.output_queue = queue.Queue(1) # Cue for the post-processed frame
+        self.thumbnail_frame = None
 
         # State changer and gesture recognizer will modify the object parameters
         self.state_changer = StateChanger()
@@ -84,6 +98,8 @@ class Scene(WindowConfig):
             fragment_path=self.resource_dir / 'shaders' / 'thumbnail.frag'
         )
 
+
+
         self.thumbnail = quad_2d()
         self.thumbnail_texture = self.ctx.texture((640, 480), components=3, dtype='f1')
         self.thumbnail_texture.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
@@ -97,37 +113,18 @@ class Scene(WindowConfig):
         self.cam_speed = 2.5 # Camera speed when moving
 
     def process_frames(self):
-        # OpenCV webcam
-        self.cap = cv2.VideoCapture(0)
-
         while self.processing_active:
             ret, frame = self.cap.read()
             if ret:
                 # calculate aspect ratio of input feed
-                h, w, _ = frame.shape
-                curr_AR = w / h
-                
-                tgt_AR = 4.0 / 3.0
-                eps = 0.01              # for floating point errors
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Make sure the frame matches the texture dimensions
+                if rgb.shape[1] != self.camera_dimensions[0] or rgb.shape[0] != self.camera_dimensions[1]:
+                    rgb = cv2.resize(rgb, self.camera_dimensions)
 
-                # Crop the thumbnail to 4:3, if required
-                if abs(curr_AR - tgt_AR) > eps:
-                    if curr_AR > tgt_AR: # too wide - crop sides
-                        tgt_w = int(h * tgt_AR)
-                        offset = (w - tgt_w) // 2
-                        frame = frame[:, offset:offset + tgt_w]
-                    
-                    if curr_AR < tgt_AR: # too tall, crop top/bottom
-                        tgt_h = int(w / tgt_AR)
-                        offset = (h - tgt_h) // 2
-                        frame = frame[offset:offset + tgt_h, :]
-
-                    frame = np.ascontiguousarray(frame) # Ensure rgb is still continguous array post-crop
-
-                cv2.waitKey(1)
-
-                if not self.q.full():           # Will only add a frame to the queue if it's empty and ready to be examined by the model
-                    self.q.put(frame.copy())    # Copy will create a standalone frame to save here, rather than passing a reference to the original frame.
+                if not self.input_queue.full():           # Will only add a frame to the queue if it's empty and ready to be examined by the model
+                    self.input_queue.put(frame.copy())    # Copy will create a standalone frame to save here, rather than passing a reference to the original frame.
 
     def run_gesture_model(self):
         """Tertiary thread that runs the gesture recognizer model. Will try to intake an image from the queue and process it
@@ -137,13 +134,20 @@ class Scene(WindowConfig):
 
         while self.processing_active:
             try:
-                frame = self.q.get()    # optionally, add timeout=1 to give a 1 second delay to wait for a new frame
+                frame = self.input_queue.get()    # optionally, add timeout=1 to give a 1 second delay to wait for a new frame
                 self.gesture_recognizer.process(frame)
 
                 # Send the annotated frame to the webcam overlay
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                with self.frame_lock:
-                    self.back_frame = rgb
+
+                # Resize to match the texture size (640x480)
+                rgb = cv2.resize(rgb, (640, 480), interpolation=cv2.INTER_AREA)
+
+                if not self.output_queue.full():
+                    self.output_queue.put(rgb)
+
+                # with self.frame_lock:
+                #     self.back_frame = rgb
 
             # Empty queue will raise exception. Could also change this flow to check for empty queue before taking to avoid
             # error handling as control flow
@@ -202,20 +206,28 @@ class Scene(WindowConfig):
         self.floor.render(self.object_prog, texture_unit=1, uv_scale=1)
 
         # Render the webcam thumbnail
-        with self.frame_lock:
-            if self.back_frame is not None:     # Safely swap frames
-                self.front_frame = self.back_frame
-                self.back_frame = None
+        if self.output_queue.full():
+            self.thumbnail_frame = self.output_queue.get()
 
-        if self.front_frame is not None:
-            frame_height, frame_width = 0.3, 0.3 # 30% of the height and width of the window. AR is already included
+        # with self.frame_lock:
+        #     if self.back_frame is not None:     # Safely swap frames
+        #         self.front_frame = self.back_frame
+        #         self.back_frame = None
+
+        if self.thumbnail_frame is not None:
+            h, w, _ = self.thumbnail_frame.shape
+            aspect = w / h
+            
+            frame_height = 0.4
+            frame_width = frame_height * aspect
+            # frame_height, frame_width = 0.3, 0.3 # 30% of the height and width of the window. AR is already included
             
             # Position the thumbnail in the top right corner (no border)
             self.thumbnail_prog['position'].value = (1.0 - frame_width / 2, 1.0 - frame_height / 2)
             self.thumbnail_prog['size'].value = (frame_width, frame_height) 
 
             # Set up texture to render the webcam frame on the quad
-            self.thumbnail_texture.write(self.front_frame.tobytes())
+            self.thumbnail_texture.write(self.thumbnail_frame.tobytes())
             self.thumbnail_texture.use(location=0)
             self.thumbnail_prog['Texture'].value = 0
 
