@@ -3,8 +3,9 @@ import numpy as np
 import moderngl_window as mglw
 import threading
 import queue
-from pyrr import Matrix44, Vector3  # For matrix math
+from pyrr import Matrix44                       # For matrix math
 from moderngl_window import WindowConfig
+from moderngl_window.geometry import quad_2d    # webcam thumbnail
 from pathlib import Path
 from program.orbit_camera import OrbitCamera
 from program.shader_program import ShaderProgram
@@ -44,7 +45,7 @@ class Scene(WindowConfig):
         self.gesture_recognizer = GestureRecognizer(self.state_changer)
 
         # Set up for multi-threading
-        self.lock = threading.Lock()
+        self.state_lock = threading.Lock()
 
         self.processing_active = True
         self.processing_thread = threading.Thread(target=self.process_frames, daemon=True) # Daemon ensures the thread ends with the main program.
@@ -53,15 +54,15 @@ class Scene(WindowConfig):
         self.processing_thread.start()
         self.model_thread.start()
 
-
         self.shader_program = ShaderProgram(self.ctx)
-        assert Path(self.resource_dir, "shaders/vertex.glsl").exists(), "Vertex shader program not found"
-        assert Path(self.resource_dir, "shaders/fragment.glsl").exists(), "Fragment shader program not found"
-
-        self.prog = self.shader_program.load_shader(
-            name = "crate",
-            vertex_path=self.resource_dir / 'shaders' / 'vertex.glsl',
-            fragment_path=self.resource_dir / 'shaders' / 'fragment.glsl'
+        assert Path(self.resource_dir, "shaders/object.vert").exists(), "object vertex shader program not found"
+        assert Path(self.resource_dir, "shaders/object.frag").exists(), "object fragment shader program not found"
+        
+        # Load the object shader program
+        self.object_prog = self.shader_program.load_shader(
+            name = "object",
+            vertex_path=self.resource_dir / 'shaders' / 'object.vert',
+            fragment_path=self.resource_dir / 'shaders' / 'object.frag'
         )
 
         print(f"Loaded shader program successfully")
@@ -81,6 +82,24 @@ class Scene(WindowConfig):
         self.floor = SceneObject(floor_mesh, floor_tex)
         self.floor.position = list([0, -0.01, 0]) # Place the floor just slightly below the object
 
+        # Set up the webcam thumbnail shader program and textures
+        assert Path(self.resource_dir, "shaders/thumbnail.vert").exists(), "object vertex shader program not found"
+        assert Path(self.resource_dir, "shaders/thumbnail.frag").exists(), "object fragment shader program not found"
+
+        self.thumbnail_prog = self.shader_program.load_shader(
+            name = "thumbnail",
+            vertex_path=self.resource_dir / 'shaders' / 'thumbnail.vert',
+            fragment_path=self.resource_dir / 'shaders' / 'thumbnail.frag'
+        )
+
+        self.thumbnail = quad_2d((.4, .4))
+        self.thumbnail_texture = self.ctx.texture((640, 480), components=3, dtype='f1')
+        self.thumbnail_texture.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+
+        self.front_frame = None
+        self.back_frame = None
+        self.frame_lock = threading.Lock() 
+
         # Setup orbit camera params
         self.cam = OrbitCamera(radius=1)
         self.cam_speed = 2.5 # Camera speed when moving
@@ -93,6 +112,31 @@ class Scene(WindowConfig):
             ret, frame = self.cap.read()
             if ret:
                 # frame = cv2.flip(frame, 1)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) #  OpenCV is BGR, but modernGL is RGB
+                
+                # calculate aspect ratio of input feed
+                h, w, _ = rgb.shape
+                curr_AR = w / h
+                print(f"current: {curr_AR}, {w} x {h}")
+                tgt_AR = 4 / 3
+                eps = 0.01              # for floating point errors
+
+                if abs(curr_AR - tgt_AR) > eps:
+                    if curr_AR > tgt_AR: # too wide - crop sides
+                        tgt_w = int(h * tgt_AR)
+                        offset = (w - tgt_w) // 2
+                        rgb = rgb[:, offset:offset + tgt_w]
+                    
+                    if curr_AR < tgt_AR: # too tall, crop top/bottom
+                        tgt_h = int(w / tgt_AR)
+                        offset = (h - tgt_h) // 2
+                        rgb = rgb[offset:offset + tgt_h, :]
+
+                    rgb = np.ascontiguousarray(rgb) # Ensure rgb is still continguous array post-crop
+
+                with self.frame_lock:
+                    self.back_frame = rgb
+                
                 # cv2.imshow("Webcam", frame)  # display the frame in another window
                 cv2.waitKey(1)
 
@@ -161,12 +205,25 @@ class Scene(WindowConfig):
         )
 
         # Establish the uniforms for the view and projection matrices
-        self.prog['view'].write(view.astype('f4').tobytes())
-        self.prog['proj'].write(proj.astype('f4').tobytes())
+        self.object_prog['view'].write(view.astype('f4').tobytes())
+        self.object_prog['proj'].write(proj.astype('f4').tobytes())
 
         # Renders each mesh individually. Internally, it will determine its texture and create a model matrix
-        self.object.render(self.prog, texture_unit=0)
-        self.floor.render(self.prog, texture_unit=1, uv_scale=1)
+        self.object.render(self.object_prog, texture_unit=0)
+        self.floor.render(self.object_prog, texture_unit=1, uv_scale=1)
+
+        # Render the webcam thumbnail
+        with self.frame_lock:
+            if self.back_frame is not None:     # Safely swap frames
+                self.front_frame = self.back_frame
+                self.back_frame = None
+
+        if self.front_frame is not None:
+            self.thumbnail_texture.write(self.front_frame.tobytes())
+            self.thumbnail_texture.use(location=0)
+            self.thumbnail_prog['Texture'].value = 0
+            self.thumbnail_prog['position'].value = (1.0 - .4, 1.0 - .3) # Top right
+            self.thumbnail.render(self.thumbnail_prog)
 
     def handle_object(self, object: SceneObject, dt:float) -> None:
         """Key listener to adjust scene object parameters. Currently only supports adjusting one object
@@ -258,7 +315,7 @@ class Scene(WindowConfig):
 
     def handle_gesture(self, object: SceneObject, dt: float):
         # Update by reading the state from state_changer
-        with self.lock:                                     # Lock prevents reading while being updated by the model
+        with self.state_lock:                                     # Lock prevents reading while being updated by the model
             scale_delta = self.state_changer.scale_delta
             rotation_delta = self.state_changer.rotation_delta
             translation_delta = self.state_changer.translation_delta
