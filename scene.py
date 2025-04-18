@@ -12,23 +12,15 @@ from program.shader_program import ShaderProgram
 from program.scene_object import SceneObject
 from program.gesture_recognizer import GestureRecognizer
 from program.state_changer import StateChanger
-import time
-
-
-
-# pip install moderngl moderngl-window pywavefront moderngl-window[imgui]
-
-
 
 class Scene(WindowConfig):
     title = "OpenCV + ModernGL"
-    window_size = (1024, 768)
+    window_size = (1600, 1200)
     gl_version = (3, 3)
     resource_dir = (Path(__file__).parent / 'utilities' / 'render_data').resolve()
     sampels = 4 # multi-sampling
     resizable = False
     vsync = True
-    use_imgui = True
 
     def __init__(self, **kwargs):
         """Initializes the program and its components. Args include the modernGL context, window size,
@@ -92,7 +84,7 @@ class Scene(WindowConfig):
             fragment_path=self.resource_dir / 'shaders' / 'thumbnail.frag'
         )
 
-        self.thumbnail = quad_2d((.4, .4))
+        self.thumbnail = quad_2d()
         self.thumbnail_texture = self.ctx.texture((640, 480), components=3, dtype='f1')
         self.thumbnail_texture.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
 
@@ -111,39 +103,31 @@ class Scene(WindowConfig):
         while self.processing_active:
             ret, frame = self.cap.read()
             if ret:
-                # frame = cv2.flip(frame, 1)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) #  OpenCV is BGR, but modernGL is RGB
-                
                 # calculate aspect ratio of input feed
-                h, w, _ = rgb.shape
+                h, w, _ = frame.shape
                 curr_AR = w / h
-                print(f"current: {curr_AR}, {w} x {h}")
-                tgt_AR = 4 / 3
+                
+                tgt_AR = 4.0 / 3.0
                 eps = 0.01              # for floating point errors
 
+                # Crop the thumbnail to 4:3, if required
                 if abs(curr_AR - tgt_AR) > eps:
                     if curr_AR > tgt_AR: # too wide - crop sides
                         tgt_w = int(h * tgt_AR)
                         offset = (w - tgt_w) // 2
-                        rgb = rgb[:, offset:offset + tgt_w]
+                        frame = frame[:, offset:offset + tgt_w]
                     
                     if curr_AR < tgt_AR: # too tall, crop top/bottom
                         tgt_h = int(w / tgt_AR)
                         offset = (h - tgt_h) // 2
-                        rgb = rgb[offset:offset + tgt_h, :]
+                        frame = frame[offset:offset + tgt_h, :]
 
-                    rgb = np.ascontiguousarray(rgb) # Ensure rgb is still continguous array post-crop
+                    frame = np.ascontiguousarray(frame) # Ensure rgb is still continguous array post-crop
 
-                with self.frame_lock:
-                    self.back_frame = rgb
-                
-                # cv2.imshow("Webcam", frame)  # display the frame in another window
                 cv2.waitKey(1)
 
                 if not self.q.full():           # Will only add a frame to the queue if it's empty and ready to be examined by the model
                     self.q.put(frame.copy())    # Copy will create a standalone frame to save here, rather than passing a reference to the original frame.
-
-                # time.sleep(5) ### Add artificial lag here if desired for testing
 
     def run_gesture_model(self):
         """Tertiary thread that runs the gesture recognizer model. Will try to intake an image from the queue and process it
@@ -155,6 +139,11 @@ class Scene(WindowConfig):
             try:
                 frame = self.q.get()    # optionally, add timeout=1 to give a 1 second delay to wait for a new frame
                 self.gesture_recognizer.process(frame)
+
+                # Send the annotated frame to the webcam overlay
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                with self.frame_lock:
+                    self.back_frame = rgb
 
             # Empty queue will raise exception. Could also change this flow to check for empty queue before taking to avoid
             # error handling as control flow
@@ -219,10 +208,17 @@ class Scene(WindowConfig):
                 self.back_frame = None
 
         if self.front_frame is not None:
+            frame_height, frame_width = 0.3, 0.3 # 30% of the height and width of the window. AR is already included
+            
+            # Position the thumbnail in the top right corner (no border)
+            self.thumbnail_prog['position'].value = (1.0 - frame_width / 2, 1.0 - frame_height / 2)
+            self.thumbnail_prog['size'].value = (frame_width, frame_height) 
+
+            # Set up texture to render the webcam frame on the quad
             self.thumbnail_texture.write(self.front_frame.tobytes())
             self.thumbnail_texture.use(location=0)
             self.thumbnail_prog['Texture'].value = 0
-            self.thumbnail_prog['position'].value = (1.0 - .4, 1.0 - .3) # Top right
+
             self.thumbnail.render(self.thumbnail_prog)
 
     def handle_object(self, object: SceneObject, dt:float) -> None:
