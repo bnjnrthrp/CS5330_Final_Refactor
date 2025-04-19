@@ -133,8 +133,6 @@ class GestureRecognizer:
             of landmarks.
         """
 
-        # bla bla bla here
-
         h, w, _ = frame.shape
 
         index_tip = results[gesture_name].landmark[8]
@@ -146,13 +144,10 @@ class GestureRecognizer:
         distance = math.sqrt((thumb_x - index_x) ** 2 + (thumb_y - index_y) ** 2)
 
         if self.last_distance_scale < 0.5 :
-            print("First distance")
-            print(distance)
             self.last_distance_scale = distance
             return 0
 
         delta = (distance - self.last_distance_scale)
-        # round to nearest integer
         delta = round(delta)
 
         self.last_distance_scale = distance
@@ -177,9 +172,6 @@ class GestureRecognizer:
         
         distance = index_x - self.last_index_position
         delta = (distance - self.last_distance_rotation)
-        
-        # round to nearest integer
-        # delta = round(delta)
         
         if delta >= 0 and gesture_name == "swipe_left_hand":
             self.last_index_position = 0
@@ -206,7 +198,6 @@ class GestureRecognizer:
         fist_center_x, fist_center_y = int(fist_center.x * w), int(fist_center.y * h)
 
         if self.first_index_frame_move:
-            print("First move")
             self.first_index_frame_move = False
             self.last_x = fist_center_x
             self.last_y = fist_center_y
@@ -216,10 +207,7 @@ class GestureRecognizer:
         delta_y = (self.last_y - fist_center_y)
         self.last_x = fist_center_x
         self.last_y = fist_center_y
-        # round to nearest integer
-        # delta = round(delta)
 
-        # self.last_distance = distance
         return delta_x, delta_y
     
     def get_consecutive_count(self, queue):
@@ -239,6 +227,21 @@ class GestureRecognizer:
                 
         return count
     
+    def reset_variables(self, resets = ["none"]):
+        
+        if "scale" in resets:
+            self.last_distance_scale = 0
+        if "move" in resets:
+            self.last_x = 0
+            self.last_y = 0
+            self.first_index_frame_move = True
+        if "rotate" in resets:
+            self.last_distance_rotation = 0
+            self.last_index_position = 0
+            self.first_index_frame = True
+            
+        self.state_changer.reset()
+    
     def process(self, frame):
         """
             Function that will run the entire logic and call the above function.
@@ -248,7 +251,6 @@ class GestureRecognizer:
             correctly classified ones.
             Example: when rotating, sometimes a hand reads as scale - need to disable switching to scale.
         """
-        # We might need to set up whatever we will memorize in terms of previous frame or previous delta...
 
         results = self.classify_gesture(frame) # Returns dictionary of "gesture_name: 21 landmarks"
 
@@ -274,32 +276,22 @@ class GestureRecognizer:
             if self.current_gesture != gesture_name and consecutive_gesture >= self.consecutive_threshold:
                 movement = self.get_movement(gesture_name)
         
-        print(f"Move name: {movement}, Scale delta: {self.state_changer.scale_delta}; Translation delta: {self.state_changer.translation_delta}; Rotation delta: {self.state_changer.rotation_delta}")
+        # print(f"Move name: {movement}, Scale delta: {self.state_changer.scale_delta}; Translation delta: {self.state_changer.translation_delta}; Rotation delta: {self.state_changer.rotation_delta}")
 
-        # with self.lock:         # Lock only while the state is being updated
         if movement == "scale":
             delta = self.calculate_scale_delta(results, frame, gesture_name)
             if abs(delta) >= 3.5:
                 self.state_changer.update_scale_delta(delta)
             else:
-                self.last_distance_rotation = 0
-                self.last_x = 0
-                self.last_y = 0
-                self.last_index_position = 0
-                self.first_index_frame_move = True
-                self.first_index_frame = True
-                self.state_changer.reset()
+                self.reset_variables(["move", "rotate"])
+                
         elif movement == "move":
             x_delta, y_delta = self.calculate_translation_delta(results, frame, gesture_name)
             
             if abs(x_delta) >= 3 and abs(y_delta) >= 3:
                 self.state_changer.update_translation_delta(x_delta, y_delta)
             else:
-                self.last_distance_scale = 0
-                self.last_distance_rotation = 0
-                self.last_index_position = 0
-                self.first_index_frame = True
-                self.state_changer.reset()
+                self.reset_variables(["scale", "rotate"])
             
         elif movement == "rotate_Y_counterclockwise":
             delta = self.calculate_rotation_delta(results, frame, gesture_name)
@@ -307,31 +299,16 @@ class GestureRecognizer:
             if abs(delta) >= 3:
                 self.state_changer.update_rotation_delta(delta)
             else:
-                self.last_distance_scale = 0
+                self.reset_variables(["scale", "move"])    
                 self.last_distance_rotation = 0
-                self.last_x = 0
-                self.last_y = 0
-                self.first_index_frame_move = True
-                self.state_changer.reset()
+
         elif movement == "rotate_Y_clockwise":
             delta = self.calculate_rotation_delta(results, frame, gesture_name)
                 
             if abs(delta) >= 3:
                 self.state_changer.update_rotation_delta(delta)
             else:
-                self.last_distance_scale = 0
+                self.reset_variables(["scale", "move"])    
                 self.last_distance_rotation = 0
-                self.last_x = 0
-                self.last_y = 0
-                self.first_index_frame_move = True
-                self.state_changer.reset()
         else:
-            self.last_distance_scale = 0
-            self.last_distance_rotation = 0
-            self.last_x = 0
-            self.last_y = 0
-            self.last_index_position = 0
-            self.first_index_frame = True
-            self.first_index_frame_move = True
-            self.state_changer.reset()
-            print(f"Move name: {movement}, Scale delta: {self.state_changer.scale_delta}; Translation delta: {self.state_changer.translation_delta}; Rotation delta: {self.state_changer.rotation_delta}")
+            self.reset_variables(["scale", "move", "rotate"])  

@@ -30,6 +30,7 @@ class Scene(WindowConfig):
         super().__init__(**kwargs)
         self.wnd.ctx.error
 
+<<<<<<< HEAD
         # Initialize the webcam to capture a frame to record its dimensions
         self.cap = cv2.VideoCapture(0)
         ret, frame = self.cap.read()
@@ -45,6 +46,11 @@ class Scene(WindowConfig):
         self.input_queue = queue.Queue(1) # Create a queue to hold the most recent frame
         self.output_queue = queue.Queue(1) # Cue for the post-processed frame
         self.thumbnail_frame = None
+=======
+        self.q = queue.Queue(1) # Create a queue to hold the most recent frame
+        
+        self.frame = None
+>>>>>>> ec0696d27c3e34e7f805eb7c14ed2be795add16d
 
         # State changer and gesture recognizer will modify the object parameters
         self.state_changer = StateChanger()
@@ -116,12 +122,18 @@ class Scene(WindowConfig):
         while self.processing_active:
             ret, frame = self.cap.read()
             if ret:
+<<<<<<< HEAD
                 # calculate aspect ratio of input feed
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
             # Make sure the frame matches the texture dimensions
                 if rgb.shape[1] != self.camera_dimensions[0] or rgb.shape[0] != self.camera_dimensions[1]:
                     rgb = cv2.resize(rgb, self.camera_dimensions)
+=======
+                # frame = cv2.flip(frame, 1)
+                # cv2.imshow("Webcam", frame)  # display the frame in another window
+                self.frame = frame
+>>>>>>> ec0696d27c3e34e7f805eb7c14ed2be795add16d
 
                 if not self.input_queue.full():           # Will only add a frame to the queue if it's empty and ready to be examined by the model
                     self.input_queue.put(frame.copy())    # Copy will create a standalone frame to save here, rather than passing a reference to the original frame.
@@ -154,8 +166,6 @@ class Scene(WindowConfig):
             except:
                 continue                # Otherwise, continue for another loop
 
-
-
     def on_render(self, time:float , frame_time: float) -> None:
         """The rendering pipeline for this program.
 
@@ -163,6 +173,10 @@ class Scene(WindowConfig):
             time (float): The time of the start of the rendering.
             frame_time (float): The time since the last frame
         """
+        
+        if self.frame is not None:
+            cv2.imshow("Webcam", self.frame)
+        
         # Camera event listener.
         # WASD will move camera orbit camera Up/Down/Left/Right
         # Q/E will zoom in/out
